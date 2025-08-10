@@ -1,0 +1,632 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>Völker-2D Prototype (mit Nebel & Minimap)</title>
+<style>
+  :root{--ui:#f5f6fa;--accent:#2d89ef;--panel:#ffffff;--muted:#666}
+  html,body{height:100%;margin:0;font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial;background:linear-gradient(#e9f3ff,#f6fbff)}
+  #app{display:flex;height:100vh;box-sizing:border-box}
+  #sidebar{width:360px;padding:14px;background:var(--ui);box-shadow:2px 0 6px rgba(0,0,0,0.06);overflow:auto}
+  #gameWrap{flex:1;display:flex;flex-direction:column;align-items:stretch;}
+  #topbar{height:56px;display:flex;gap:8px;align-items:center;padding:6px 12px;background:transparent}
+  #canvasArea{flex:1;position:relative}
+  canvas#game{display:block;width:100%;height:100%;background:#a7d3ff;touch-action:none}
+  .resRow{display:flex;gap:8px;flex-wrap:wrap}
+  .res{background:var(--panel);padding:8px;border-radius:8px;border:1px solid rgba(0,0,0,0.06);min-width:94px;text-align:center}
+  .btn{display:inline-block;padding:8px 10px;border-radius:8px;border:1px solid #cfcfcf;background:white;cursor:pointer}
+  .btn-primary{background:var(--accent);color:white;border-color:var(--accent)}
+  h3{margin:8px 0 6px;font-size:15px}
+  .buildGrid{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+  #minimap{position:absolute;right:12px;top:12px;width:200px;height:120px;border-radius:6px;border:2px solid rgba(0,0,0,0.08);background:rgba(255,255,255,0.85);box-shadow:0 6px 14px rgba(0,0,0,0.08);z-index:40;padding:6px;display:flex;flex-direction:column}
+  #minimap canvas{flex:1;border-radius:4px;background:#000}
+  .log{height:120px;overflow:auto;background:#0f1720;color:#bfbfbf;padding:8px;border-radius:8px;font-size:13px}
+  .small{font-size:12px;color:var(--muted)}
+  .compact{font-size:13px}
+  footer{padding:6px 12px;background:transparent;text-align:right;color:#666}
+  /* Touch: größere hit-targets */
+  @media (max-width:900px){
+    #sidebar{width:320px;padding:8px}
+    .btn{padding:12px 14px}
+    #minimap{width:160px;height:100px}
+  }
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="sidebar">
+    <h2>Völker — Prototype (2D)</h2>
+    <div class="resRow" id="resRow"></div>
+    <div style="margin-top:8px">
+      <div class="compact small">Bevölkerung: <span id="pop">0</span></div>
+      <div class="compact small">Soldaten: <span id="sold">0</span></div>
+    </div>
+
+    <h3>Bauen</h3>
+    <div class="buildGrid" id="buildGrid"></div>
+
+    <h3>Aktionen</h3>
+    <div style="display:flex;gap:8px;flex-wrap:wrap">
+      <div class="btn" id="actionMove">Einheit bewegen</div>
+      <div class="btn" id="actionBuild">Bauen</div>
+      <div class="btn" id="actionAttack">Angreifen</div>
+      <div class="btn" id="actionGather">Sammeln</div>
+      <div class="btn btn-primary" id="trainBtn">Truppen trainieren</div>
+    </div>
+
+    <h3>Forschung</h3>
+    <div style="display:flex;gap:8px;flex-direction:column">
+      <div class="btn" id="buildLab">Labor bauen (erhöht Wissen)</div>
+      <div class="btn" id="researchAgri">+ Landwirtschaft (+25 Wissen)</div>
+    </div>
+
+    <h3>Spielstand</h3>
+    <div style="display:flex;gap:8px">
+      <div class="btn" id="saveBtn">Speichern</div>
+      <div class="btn" id="loadBtn">Laden</div>
+      <div class="btn" id="resetBtn">Neu starten</div>
+    </div>
+
+    <h3>Protokoll</h3>
+    <div class="log" id="log"></div>
+
+    <div style="margin-top:10px" class="small">
+      Tippe auf Felder, um zu interagieren. Auf iPad: tippe statt zu hoveren. Minimap oben rechts.
+    </div>
+  </div>
+
+  <div id="gameWrap">
+    <div id="topbar">
+      <div class="small">Karte: 20×12</div>
+      <div style="flex:1"></div>
+      <div class="small">Erkunde das Gebiet — Nebel der Kriege aktiv</div>
+    </div>
+    <div id="canvasArea">
+      <canvas id="game"></canvas>
+
+      <div id="minimap">
+        <canvas id="mini"></canvas>
+        <div style="display:flex;gap:6px;margin-top:6px">
+          <div class="small">Erkundet</div>
+          <div style="flex:1"></div>
+          <div class="small" id="miniInfo"></div>
+        </div>
+      </div>
+
+    </div>
+    <footer>Touch-optimiert • Speichern in browser (Safari iPad kompatibel)</footer>
+  </div>
+</div>
+
+<script>
+/* -------------------- Spielkonstanten -------------------- */
+const TILE = 48;
+const MAP_W = 20;
+const MAP_H = 12;
+const CANVAS = document.getElementById('game');
+const CTX = CANVAS.getContext('2d');
+const MINI = document.getElementById('mini');
+const miniCtx = MINI.getContext('2d');
+
+let scale = 1;
+let viewOffsetX = 0, viewOffsetY = 0;
+
+const buildDefs = {
+  rathaus:{name:'Rathaus', cost:{holz:120,stein:80,gold:30}},
+  haus:{name:'Haus', cost:{holz:50,stein:10}},
+  bauernhof:{name:'Bauernhof', cost:{holz:40}},
+  holzfaeller:{name:'Holzfäller', cost:{holz:60}},
+  steinbruch:{name:'Steinbruch', cost:{holz:40,stein:40}},
+  schmiede:{name:'Schmiede', cost:{holz:60,stein:40}},
+  kaserne:{name:'Kaserne', cost:{holz:80,stein:60,gold:20}},
+  taverne:{name:'Taverne', cost:{holz:40,gold:10}},
+  labor:{name:'Labor', cost:{holz:100,stein:80,gold:20}}
+};
+
+/* -------------------- Spielzustand -------------------- */
+let game = {
+  map: [], // tiles {t:0 grass,1 forest,2 stone,3 field,4 water}
+  explored: [], // same dims boolean
+  buildings: [], // {x,y,type}
+  units: [], // {x,y,type,owner='player',hp,move}
+  resources: {holz:220,stein:150,nahrung:120,gold:60,wissen:0},
+  population: 6,
+  soldiers: 0,
+  neighborVillages: [],
+  selectedAction:'idle', // idle | build | move | attack | gather
+  selectedBuildType:null,
+  research:{agri:false},
+  time:0
+};
+
+/* -------------------- Hilfsfunktionen -------------------- */
+function rand(a,b){return Math.floor(Math.random()*(b-a+1))+a}
+function log(msg){const el=document.getElementById('log'); el.innerHTML = new Date().toLocaleTimeString()+' — '+msg+'<br>'+el.innerHTML;}
+function clamp(v,a,b){return Math.max(a,Math.min(b,v));}
+
+/* -------------------- Karte initialisieren -------------------- */
+function initMap(){
+  game.map=[]; game.explored=[];
+  for(let y=0;y<MAP_H;y++){
+    const row=[]; const exp=[];
+    for(let x=0;x<MAP_W;x++){
+      const r=Math.random();
+      let t=0;
+      if(r<0.14) t=1;
+      else if(r<0.24) t=2;
+      else if(r<0.40) t=3;
+      else if(r<0.45) t=4;
+      row.push({t});
+      exp.push(false);
+    }
+    game.map.push(row); game.explored.push(exp);
+  }
+  // place neighbor villages around edges
+  game.neighborVillages = [];
+  for(let i=0;i<6;i++){
+    let x,y;
+    do{
+      x = rand(6,MAP_W-2); y = rand(1,MAP_H-2);
+    } while(game.map[y][x].t===4 || dist(x,y,3,3)<2);
+    game.neighborVillages.push({x,y,defense:rand(30,80),pop:rand(30,120),name:'Dorf '+(i+1)});
+  }
+}
+
+/* -------------------- Canvas Größen & Draw -------------------- */
+function resize(){
+  const wrap = document.getElementById('canvasArea');
+  CANVAS.width = wrap.clientWidth;
+  CANVAS.height = wrap.clientHeight - 0;
+  // minimap settings
+  MINI.width = 196; MINI.height = 96;
+  draw();
+}
+window.addEventListener('resize', resize);
+
+/* tile colors */
+function tileColor(t){
+  switch(t){
+    case 0: return '#7ec26a';
+    case 1: return '#2f8b3e';
+    case 2: return '#9e9ea0';
+    case 3: return '#f2d98a';
+    case 4: return '#6ec0ff';
+  }
+}
+
+/* draw loop */
+function draw(){
+  CTX.clearRect(0,0,CANVAS.width,CANVAS.height);
+  // compute tile size based on canvas and map to show
+  // we'll center map
+  const w = MAP_W * TILE;
+  const h = MAP_H * TILE;
+  const sx = (CANVAS.width - w)/2 + viewOffsetX;
+  const sy = (CANVAS.height - h)/2 + viewOffsetY;
+
+  // draw tiles
+  for(let y=0;y<MAP_H;y++){
+    for(let x=0;x<MAP_W;x++){
+      const tx = sx + x*TILE, ty = sy + y*TILE;
+      CTX.fillStyle = tileColor(game.map[y][x].t);
+      CTX.fillRect(tx, ty, TILE, TILE);
+      CTX.strokeStyle = 'rgba(0,0,0,0.06)';
+      CTX.strokeRect(tx,ty,TILE,TILE);
+      // fog overlay if unexplored
+      if(!game.explored[y][x]){
+        CTX.fillStyle = 'rgba(12,20,30,0.85)';
+        CTX.fillRect(tx,ty,TILE,TILE);
+      } else {
+        // subtle grid overlay on explored grass
+        if(game.map[y][x].t===1){
+          CTX.fillStyle='rgba(0,0,0,0.02)'; CTX.fillRect(tx,ty,TILE,TILE);
+        }
+      }
+    }
+  }
+
+  // draw neighbor villages (if explored)
+  for(const v of game.neighborVillages){
+    if(!game.explored[v.y][v.x]) continue;
+    const tx = sx + v.x*TILE, ty = sy + v.y*TILE;
+    CTX.fillStyle = '#b24b4b';
+    CTX.fillRect(tx+6,ty+6,TILE-12,TILE-12);
+    CTX.fillStyle='white'; CTX.font='12px sans-serif';
+    CTX.fillText(v.name, tx+6, ty+18);
+  }
+
+  // draw buildings
+  for(const b of game.buildings){
+    if(!game.explored[b.y][b.x]) continue;
+    drawBuildingAt(b.x,b.y,b.type,sx,sy);
+  }
+
+  // draw units
+  for(const u of game.units){
+    if(!game.explored[u.y][u.x]) continue;
+    drawUnit(u,sx,sy);
+  }
+
+  // overlay for selected action (simple)
+  CTX.fillStyle='rgba(255,255,255,0.0)';
+
+  drawMiniMap();
+}
+
+/* draw building */
+function drawBuildingAt(x,y,type,sx,sy){
+  const tx = sx + x*TILE, ty = sy + y*TILE;
+  switch(type){
+    case 'rathaus':
+      CTX.fillStyle='#e07b39'; CTX.fillRect(tx+4,ty+4,TILE-8,TILE-8);
+      CTX.fillStyle='white'; CTX.fillText('Rathaus', tx+6, ty+20);
+      break;
+    case 'haus':
+      CTX.fillStyle='#fff'; CTX.fillRect(tx+6,ty+10,TILE-12,TILE-14);
+      CTX.fillStyle='#9c6b4a'; CTX.fillRect(tx+8,ty+6,TILE-16,8);
+      CTX.fillStyle='#333'; CTX.fillText('Haus', tx+8, ty+36);
+      break;
+    case 'bauernhof':
+      CTX.fillStyle='#f7e28a'; CTX.fillRect(tx+4,ty+6,TILE-8,TILE-10);
+      CTX.fillStyle='#333'; CTX.fillText('Bauernhof', tx+6, ty+36);
+      break;
+    case 'holzfaeller':
+      CTX.fillStyle='#2f8b3e'; CTX.fillRect(tx+6,ty+6,TILE-12,TILE-12);
+      CTX.fillStyle='white'; CTX.fillText('Holzf.', tx+8, ty+36);
+      break;
+    case 'steinbruch':
+      CTX.fillStyle='#8f8f8f'; CTX.fillRect(tx+6,ty+6,TILE-12,TILE-12);
+      CTX.fillStyle='white'; CTX.fillText('Steinbr.', tx+6, ty+36);
+      break;
+    case 'schmiede':
+      CTX.fillStyle='#b85b5b'; CTX.fillRect(tx+6,ty+6,TILE-12,TILE-12);
+      CTX.fillStyle='white'; CTX.fillText('Schmiede', tx+6, ty+36);
+      break;
+    case 'kaserne':
+      CTX.fillStyle='#6b6bb8'; CTX.fillRect(tx+4,ty+6,TILE-8,TILE-12);
+      CTX.fillStyle='white'; CTX.fillText('Kaserne', tx+10, ty+36);
+      break;
+    case 'taverne':
+      CTX.fillStyle='#c67bb8'; CTX.fillRect(tx+6,ty+6,TILE-12,TILE-12);
+      CTX.fillStyle='white'; CTX.fillText('Taverne', tx+8, ty+36);
+      break;
+    case 'labor':
+      CTX.fillStyle='#6b9bb8'; CTX.fillRect(tx+4,ty+6,TILE-8,TILE-12);
+      CTX.fillStyle='white'; CTX.fillText('Labor', tx+12, ty+36);
+      break;
+  }
+}
+
+/* draw a stylized 'amazon' unit (female silhouette with spear) */
+function drawUnit(u,sx,sy){
+  const x = sx + u.x*TILE + TILE/2;
+  const y = sy + u.y*TILE + TILE/2;
+  // shadow
+  CTX.beginPath(); CTX.fillStyle='rgba(0,0,0,0.12)'; CTX.ellipse(x,y+14,12,6,0,0,2*Math.PI); CTX.fill();
+  // body
+  CTX.fillStyle = '#5b2b7b';
+  CTX.beginPath(); CTX.ellipse(x,y-2,10,14,0,0,2*Math.PI); CTX.fill();
+  // head
+  CTX.fillStyle='#f4c9b8'; CTX.beginPath(); CTX.arc(x,y-18,6,0,2*Math.PI); CTX.fill();
+  // hair (long pony)
+  CTX.fillStyle='#2b1b2b'; CTX.beginPath(); CTX.ellipse(x+6,y-10,3,8,0,0,2*Math.PI); CTX.fill();
+  // spear
+  CTX.strokeStyle='#8a6b3a'; CTX.lineWidth=2;
+  CTX.beginPath(); CTX.moveTo(x-8,y+6); CTX.lineTo(x+14,y-22); CTX.stroke();
+  CTX.fillStyle='#d1d1d1';
+  CTX.beginPath(); CTX.moveTo(x+14,y-22); CTX.lineTo(x+10,y-18); CTX.lineTo(x+16,y-14); CTX.closePath(); CTX.fill();
+  // small HP bar
+  CTX.fillStyle='red'; CTX.fillRect(x-12,y+20,24,4);
+  CTX.fillStyle='lime'; CTX.fillRect(x-12,y+20,24*Math.max(0,u.hp/100),4);
+}
+
+/* -------------------- Minimap -------------------- */
+function drawMiniMap(){
+  miniCtx.clearRect(0,0,MINI.width,MINI.height);
+  const cellW = MINI.width / MAP_W;
+  const cellH = MINI.height / MAP_H;
+  for(let y=0;y<MAP_H;y++){
+    for(let x=0;x<MAP_W;x++){
+      // color by tile if explored, else dark
+      if(game.explored[y][x]){
+        const color = tileColor(game.map[y][x].t);
+        miniCtx.fillStyle = color;
+      } else {
+        miniCtx.fillStyle = '#0b0b0b';
+      }
+      miniCtx.fillRect(x*cellW, y*cellH, cellW, cellH);
+    }
+  }
+  // draw buildings as small dots
+  for(const b of game.buildings){
+    if(!game.explored[b.y][b.x]) continue;
+    miniCtx.fillStyle = '#ffffff';
+    miniCtx.fillRect(b.x*cellW+1, b.y*cellH+1, Math.max(2,cellW-2), Math.max(2,cellH-2));
+  }
+  // draw units
+  for(const u of game.units){
+    if(!game.explored[u.y][u.x]) continue;
+    miniCtx.fillStyle = '#ffdd00';
+    miniCtx.fillRect(u.x*cellW+1, u.y*cellH+1, Math.max(2,cellW-2), Math.max(2,cellH-2));
+  }
+  // draw neighbor villages if explored
+  for(const v of game.neighborVillages){
+    if(!game.explored[v.y][v.x]) continue;
+    miniCtx.fillStyle = '#e04b4b';
+    miniCtx.fillRect(v.x*cellW+1, v.y*cellH+1, Math.max(2,cellW-2), Math.max(2,cellH-2));
+  }
+  document.getElementById('miniInfo').innerText = (game.time)+'s';
+}
+
+/* -------------------- Interaktionen -------------------- */
+function mapPixelToTile(px,py){
+  const w = MAP_W*TILE; const h = MAP_H*TILE;
+  const sx = (CANVAS.width - w)/2 + viewOffsetX;
+  const sy = (CANVAS.height - h)/2 + viewOffsetY;
+  const tx = Math.floor((px - sx)/TILE);
+  const ty = Math.floor((py - sy)/TILE);
+  return {tx,ty};
+}
+
+CANVAS.addEventListener('pointerdown', e=>{
+  e.preventDefault();
+  const rect = CANVAS.getBoundingClientRect();
+  const px = e.clientX - rect.left;
+  const py = e.clientY - rect.top;
+  const {tx,ty} = mapPixelToTile(px,py);
+  if(tx<0||ty<0||tx>=MAP_W||ty>=MAP_H) return;
+  // reveal tile on tap (also used for interactions)
+  revealAround(tx,ty,2);
+  if(game.selectedAction === 'build' && game.selectedBuildType){
+    attemptBuild(tx,ty,game.selectedBuildType);
+    game.selectedAction='idle'; game.selectedBuildType=null;
+    draw(); return;
+  }
+  if(game.selectedAction === 'gather'){
+    gatherAt(tx,ty); game.selectedAction='idle'; draw(); return;
+  }
+  if(game.selectedAction === 'attack'){
+    const target = game.neighborVillages.find(v=>v.x===tx && v.y===ty);
+    if(target) performAttack(target);
+    game.selectedAction='idle'; draw(); return;
+  }
+  if(game.selectedAction === 'move'){
+    const sel = selectNearestUnit(tx,ty);
+    if(sel){
+      moveUnitTo(sel,tx,ty); draw(); return;
+    }
+  }
+  // default: if tapped on empty explored tile, just collect if resource tile
+  if(game.explored[ty][tx]){
+    const t = game.map[ty][tx].t;
+    if(t===1 || t===2 || t===3) {
+      // gather
+      gatherAt(tx,ty); draw(); return;
+    } else {
+      log('Hier: '+['Wiese','Wald','Stein','Feld','Wasser'][t]);
+    }
+  } else {
+    log('Unbekanntes Territorium — zuerst erkunden.');
+  }
+});
+
+/* -------------------- Aktionen: Build / Gather / Move / Attack -------------------- */
+function attemptBuild(x,y,type){
+  if(game.map[y][x].t===4){ log('Wasser — hier nicht bauen.'); return; }
+  if(getBuildingAt(x,y)){ log('Hier steht bereits etwas.'); return; }
+  const def = buildDefs[type]; if(!def){ log('Unbekanntes Gebäude'); return; }
+  if(!canAfford(def.cost)){ log('Nicht genug Ressourcen für '+def.name); return; }
+  pay(def.cost);
+  game.buildings.push({x,y,type});
+  if(type==='haus'){ game.population += 3; }
+  log(def.name + ' gebaut bei '+x+','+y);
+  revealAround(x,y,2);
+  updateUI();
+}
+
+function gatherAt(x,y){
+  const t = game.map[y][x].t;
+  if(t===1){
+    const a = rand(10,22); game.resources.holz += a; log('Holz gesammelt +'+a);
+    game.map[y][x].t = 0;
+  } else if(t===2){
+    const a = rand(6,18); game.resources.stein += a; log('Stein abgebaut +'+a);
+    game.map[y][x].t = 0;
+  } else if(t===3){
+    let a = rand(8,18); if(game.research.agri) a = Math.floor(a*1.4);
+    game.resources.nahrung += a; log('Nahrung geerntet +'+a);
+    game.map[y][x].t = 0;
+  } else {
+    log('Hier gibt es nichts zu sammeln.');
+  }
+  updateUI();
+}
+
+function selectNearestUnit(tx,ty){
+  if(game.units.length===0) { log('Keine Einheiten verfügbar.'); return null;}
+  // choose the nearest unit to tile
+  let best=null,bd=1e9;
+  for(const u of game.units){
+    const d = Math.abs(u.x-tx)+Math.abs(u.y-ty);
+    if(d<bd){ bd=d; best=u; }
+  }
+  return best;
+}
+
+function moveUnitTo(unit,tx,ty){
+  // simple instant move + reveal
+  unit.x = clamp(tx,0,MAP_W-1); unit.y = clamp(ty,0,MAP_H-1);
+  log('Einheit bewegt nach '+tx+','+ty);
+  revealAround(tx,ty,3);
+  draw();
+}
+
+/* -------------------- Kampf -------------------- */
+function performAttack(target){
+  if(game.soldiers<=0){ log('Keine Soldaten zum Angreifen.'); return; }
+  log('Angriff auf '+target.name+' mit '+game.soldiers+' Soldaten (Gegner Verteidigung '+target.defense+').');
+  const atk = game.soldiers * rand(6,12);
+  const def = target.defense * rand(6,12);
+  if(atk > def){
+    const lw = rand(30,80), ls = rand(20,60), lg = rand(15,50);
+    game.resources.holz += lw; game.resources.stein += ls; game.resources.gold += lg;
+    game.soldiers = Math.max(0, Math.floor(game.soldiers * (0.4 + Math.random()*0.4)));
+    log('Sieg! Beute: Holz+'+lw+', Stein+'+ls+', Gold+'+lg+'. Verbl. Soldaten: '+game.soldiers);
+    target.defense = Math.max(0, target.defense - rand(15,35));
+    if(target.defense===0){ log(target.name+' ist geplündert.'); game.neighborVillages = game.neighborVillages.filter(v=>v!==target); }
+  } else {
+    const lost = Math.floor(game.soldiers * (0.3 + Math.random()*0.6));
+    game.soldiers = Math.max(0, game.soldiers - lost);
+    log('Niederlage. Verluste: '+lost+' Soldaten.');
+  }
+  updateUI();
+}
+
+/* -------------------- Utility -------------------- */
+function getBuildingAt(x,y){ return game.buildings.find(b=>b.x===x && b.y===y); }
+function dist(x1,y1,x2,y2){return Math.hypot(x2-x1,y2-y1); }
+function canAfford(cost){
+  for(const k in cost){ if((game.resources[k]||0) < cost[k]) return false; } return true;
+}
+function pay(cost){ for(const k in cost) game.resources[k] = (game.resources[k]||0) - (cost[k]||0); updateUI(); }
+
+/* -------------------- Spawn: initial buildings & units -------------------- */
+function startNewGame(){
+  game.buildings = [];
+  game.units = [];
+  game.resources = {holz:220,stein:150,nahrung:120,gold:60,wissen:0};
+  game.population = 6; game.soldiers = 0; game.research = {agri:false}; game.time=0;
+  initMap();
+  // initial village cluster
+  game.buildings.push({x:3,y:3,type:'rathaus'});
+  game.buildings.push({x:4,y:3,type:'haus'}); game.buildings.push({x:3,y:4,type:'haus'});
+  game.buildings.push({x:5,y:3,type:'bauernhof'});
+  game.buildings.push({x:4,y:4,type:'holzfaeller'});
+  // spawn 2 units (amazons)
+  game.units.push({x:5,y:4,type:'amazon',hp:100,move:3});
+  game.units.push({x:6,y:4,type:'amazon',hp:100,move:3});
+  // reveal around town
+  revealAround(3,3,3);
+  draw(); updateUI();
+  log('Neues Spiel gestartet. Erkunde die Karte & baue dein Dorf aus.');
+}
+
+/* -------------------- UI: buttons etc -------------------- */
+function setupUI(){
+  // resources row
+  const resRow = document.getElementById('resRow');
+  function updateResUI(){
+    resRow.innerHTML='';
+    for(const k of ['holz','stein','nahrung','gold','wissen']){
+      const d = document.createElement('div'); d.className='res';
+      d.innerHTML = `<div class="small">${k}</div><div style="font-weight:600;font-size:16px">${game.resources[k]||0}</div>`;
+      resRow.appendChild(d);
+    }
+    document.getElementById('pop').innerText = game.population;
+    document.getElementById('sold').innerText = game.soldiers;
+  }
+  window.updateUI = updateResUI;
+
+  // build buttons
+  const buildGrid = document.getElementById('buildGrid');
+  buildGrid.innerHTML='';
+  for(const k in buildDefs){
+    const b = document.createElement('div'); b.className='btn';
+    b.innerText = buildDefs[k].name;
+    b.onclick = ()=>{ game.selectedAction='build'; game.selectedBuildType=k; log('Baumodus: '+buildDefs[k].name + ' — tippe auf Karte'); };
+    buildGrid.appendChild(b);
+  }
+
+  document.getElementById('actionBuild').onclick = ()=>{ game.selectedAction='build'; log('Baumodus aktiv'); };
+  document.getElementById('actionGather').onclick = ()=>{ game.selectedAction='gather'; log('Sammelmodus aktiv — tippe auf Rohstofffelder'); };
+  document.getElementById('actionAttack').onclick = ()=>{ game.selectedAction='attack'; log('Angriffsmodus aktiv — tippe auf ein Nachbardorf'); };
+  document.getElementById('actionMove').onclick = ()=>{ game.selectedAction='move'; log('Bewegungsmodus aktiv — tippe auf Ziel'); };
+
+  document.getElementById('trainBtn').onclick = ()=>{
+    // require kaserne & schmiede
+    const hasK = game.buildings.some(b=>b.type==='kaserne');
+    const hasS = game.buildings.some(b=>b.type==='schmiede');
+    if(!hasK || !hasS){ log('Zum Trainieren brauchst du Kaserne & Schmiede.'); return; }
+    const cost = {nahrung:30,gold:15};
+    if(!canAfford(cost)){ log('Nicht genug Ressourcen.'); return; }
+    pay(cost);
+    game.soldiers += 6;
+    log('6 Soldaten ausgebildet. Soldaten insgesamt: '+game.soldiers);
+    updateUI();
+  };
+
+  document.getElementById('buildLab').onclick = ()=>{
+    game.selectedAction='build'; game.selectedBuildType='labor';
+    log('Baue ein Labor: tippe auf freie Stelle.');
+  };
+
+  document.getElementById('researchAgri').onclick = ()=>{
+    if(!game.buildings.some(b=>b.type==='labor')){ log('Du brauchst ein Labor für Forschung.'); return; }
+    if(game.research.agri){ log('Landwirtschaft bereits erforscht.'); return; }
+    const cost = {wissen:25,gold:20};
+    if(!canAfford(cost)){ log('Nicht genug Wissen/Gold.'); return; }
+    pay(cost);
+    game.research.agri = true; log('Landwirtschaft verbessert: Ertrag erhöht!');
+  };
+
+  document.getElementById('saveBtn').onclick = ()=>{
+    localStorage.setItem('voelker_save', JSON.stringify(game));
+    log('Spiel gespeichert (localStorage).');
+  };
+  document.getElementById('loadBtn').onclick = ()=>{
+    const s = localStorage.getItem('voelker_save');
+    if(!s){ log('Kein Save gefunden.'); return; }
+    try{ game = JSON.parse(s); log('Spielstand geladen.'); draw(); updateUI(); }
+    catch(e){ log('Fehler beim Laden.'); }
+  };
+  document.getElementById('resetBtn').onclick = ()=>{ if(confirm('Neues Spiel starten? Fortschritt geht verloren.')) startNewGame(); };
+
+  updateUI();
+}
+
+setupUI();
+
+/* -------------------- Fog of war -------------------- */
+function revealAround(x,y,r){
+  for(let yy=y-r;yy<=y+r;yy++){
+    for(let xx=x-r;xx<=x+r;xx++){
+      if(xx>=0 && yy>=0 && xx<MAP_W && yy<MAP_H){
+        game.explored[yy][xx] = true;
+      }
+    }
+  }
+}
+
+/* -------------------- Background tick (production etc) -------------------- */
+function tick(){
+  game.time += 1;
+  // buildings produce
+  for(const b of game.buildings){
+    switch(b.type){
+      case 'bauernhof': game.resources.nahrung += (2 + (game.research.agri?1:0)); break;
+      case 'holzfaeller': game.resources.holz += 3; break;
+      case 'steinbruch': game.resources.stein += 2; break;
+      case 'taverne': game.resources.gold += 1; break;
+      case 'labor': game.resources.wissen += 1; break;
+    }
+  }
+  // small passive population growth
+  if(game.resources.nahrung > game.population*0.2 && game.buildings.some(b=>b.type==='haus')){
+    if(Math.random()<0.1){ game.population += 1; log('Ein neuer Dorfbewohner wurde geboren.'); }
+  }
+  updateUI(); draw();
+}
+
+/* -------------------- Save on unload (good for iPad Safari) -------------------- */
+window.addEventListener('beforeunload', ()=>{ try{ localStorage.setItem('voelker_autosave', JSON.stringify(game)); }catch(e){} });
+
+/* -------------------- Start -------------------- */
+startNewGame();
+resize();
+setInterval(tick,4000);
+
+/* -------------------- End of Script -------------------- */
+</script>
+</body>
+</html>
